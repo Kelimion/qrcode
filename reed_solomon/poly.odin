@@ -1,143 +1,140 @@
 package reed_solomon
 
 import "core:fmt"
-import "core:mem"
 
 Polynomial :: struct {
 	data: []byte,
-	ptr:  [^]byte, // holds the base ptr (some procs slice data)
-	len:  int,
+	orig: []byte,
 }
 
-
-into_poly :: proc(data: []byte, own_memory := false) -> Polynomial {
-	if data == nil || len(data) == 0 {return {}}
+into_poly :: proc(data: []byte, owned := false) -> (p: Polynomial) {
+	if len(data) == 0 {
+		return
+	}
 
 	// Find first non-zero coefficient
-	first_non_zero := 0
-	for i in 0 ..< len(data) {
-		if data[i] != 0 {
-			first_non_zero = i
+	non_zero_offset := 0
+	for d, i in data {
+		if d != 0 {
+			non_zero_offset = i
 			break
 		}
 	}
+
 	// If all data are zero, return zero polynomial
-	if first_non_zero == len(data) {return {}}
-	ret_data := data
-	// Remove leading zeros
-	if first_non_zero > 0 {
-		ret_data = data[first_non_zero:]
+	if non_zero_offset == len(data) - 1 {
+		return
 	}
 
-	p := Polynomial {
-		data = ret_data,
-		ptr  = nil,
+	// Start at first non-zero coefficient, which can be an offset of zero
+	p.data = data[non_zero_offset:]
+
+	// Only set p.orig if data is owned, and not a slice into other memory
+	if owned {
+		p.orig = data
 	}
-	// only set p.ptr if this is _not_ a slice into someone else's data
-	if own_memory {
-		p.ptr = &p.data[0]
-		p.len = len(p.data)
-	}
-	return p
+	return
 }
+
 destroy_poly :: proc(p: Polynomial) {
-	if p.ptr != nil {
-		delete(p.ptr[:p.len])
+	delete(p.orig)
+}
+
+degree :: proc(p: Polynomial) -> (res: int) {
+	return len(p.data) - 1 if len(p.data) > 0 else 0
+}
+
+get_coefficient :: proc(p: Polynomial, degree: int) -> (coeff: byte, ok: bool) {
+	if p.data == nil || degree < 0 || degree > len(p.data) - 1 {
+		return
 	}
-}
-
-degree :: proc(p: Polynomial) -> int {
-	if p.data == nil {return 0}
-	return len(p.data) - 1
-}
-
-get_coefficient :: proc(p: Polynomial, degree: int) -> (byte, bool) {
-	if p.data == nil || degree < 0 || degree > len(p.data) - 1 {return 0, false}
 	return p.data[len(p.data) - 1 - degree], true
 }
 
-add_poly :: proc(a, b: Polynomial, allocater := context.allocator) -> Polynomial {
-	if a.data == nil || len(a.data) == 0 {return b}
-	if b.data == nil || len(b.data) == 0 {return a}
-	context.allocator = allocater
+add_poly :: proc(a, b: Polynomial, allocator := context.allocator) -> Polynomial {
+	context.allocator = allocator
 
-	result_len := max(len(a.data), len(b.data))
-	result := make([]byte, result_len)
+	a_len := len(a.data)
+	b_len := len(b.data)
 
-	for i in 0 ..< len(a.data) {
-		result[result_len - len(a.data) + i] = a.data[i] // load 'a' into new poly
+	if a_len == 0 {return b}
+	if b_len == 0 {return a}
+
+	max_len := max(a_len, b_len)
+	result  := make([]byte, max_len)
+
+	for ad, i in a.data {
+		result[max_len - a_len + i] = ad  // Load 'a' into new poly
 	}
-	for i in 0 ..< len(b.data) {
-		idx := result_len - len(b.data) + i
-		result[idx] ~= b.data[i] // XOR for GF(2^8) addition
+	for bd, i in b.data {
+		result[max_len - b_len + i] ~= bd // XOR for GF(2^8) addition
 	}
 
-	return into_poly(result, true) // res is owned
+	return into_poly(result, true) // Result is owned
 }
 
 // clones
-multiply_scalar :: proc(
-	p: ^Polynomial,
-	scalar: byte,
-	allocater := context.allocator,
-) -> Polynomial {
-	if scalar == 0 || p.data == nil {return into_poly(nil)}
-	if scalar == 1 {return into_poly(p.data)}
-	context.allocator = allocater
+multiply_scalar :: proc(p: ^Polynomial, scalar: byte, allocator := context.allocator) -> Polynomial {
+	context.allocator = allocator
+
+	if scalar == 0 || p.data == nil {
+		return into_poly(nil)
+	}
+
+	if scalar == 1 {
+		return into_poly(p.data)
+	}
 
 	result := make([]byte, len(p.data))
 
-	for i in 0 ..< len(p.data) {
-		result[i] = multiply(p.data[i], scalar)
+	for pd, i in p.data {
+		result[i] = multiply(pd, scalar)
 	}
 
 	return into_poly(result, true) // owned
 }
 
 // Multiply two polynomials
-multiply_poly :: proc(a, b: Polynomial, allocater := context.allocator) -> Polynomial {
-	if a.data == nil || len(a.data) == 0 || b.data == nil || len(b.data) == 0 {
+multiply_poly :: proc(a, b: Polynomial, allocator := context.allocator) -> Polynomial {
+	context.allocator = allocator
+
+	if len(a.data) == 0 || len(b.data) == 0 {
 		return into_poly(nil)
 	}
-	context.allocator = allocater
 
 	// Create a result polynomial with degree = deg(a) + deg(b)
 	result_len := len(a.data) + len(b.data) - 1
 	result := make([]byte, result_len)
 
 	// Multiply each term
-	for i in 0 ..< len(a.data) {
-		for j in 0 ..< len(b.data) {
-			term := multiply(a.data[i], b.data[j])
-			idx := i + j
-			result[idx] ~= term // XOR for GF(2^8) addition
+	for ad, i in a.data {
+		for bd, j in b.data {
+			term := multiply(ad, bd)
+			result[i + j] ~= term // XOR for GF(2^8) addition
 		}
 	}
 
-	return into_poly(result, true) //owned
+	return into_poly(result, true) // Owned
 }
 
 // Divide polynomials: a / b = quotient with remainder
-divide_poly :: proc(
-	a, b: Polynomial,
-	return_quotient := false,
-	allocater := context.allocator,
-) -> (
-	quotient, remainder: Polynomial,
-	ok: bool,
-) {
-	if b.data == nil || len(b.data) == 0 || b.data[0] == 0 {
+divide_poly :: proc(a, b: Polynomial, return_quotient := false, allocator := context.allocator) -> (quotient, remainder: Polynomial, ok: bool) {
+	context.allocator = allocator
+
+	if len(b.data) == 0 || b.data[0] == 0 {
 		fmt.eprintln("Error: Division by zero polynomial")
 		ok = false
 		return
 	}
-	if a.data == nil {return into_poly(nil), into_poly(nil), true}
+	if a.data == nil {
+		return into_poly(nil), into_poly(nil), true
+	}
 
 	// Copy a's data for the remainder
 	remainder_coeffs := make([]byte, len(a.data))
 	copy(remainder_coeffs, a.data)
 	remainder = into_poly(remainder_coeffs, true) // owned
-	remainder_base := remainder
+
 	// If a's degree is less than b's, quotient is 0 and remainder is a
 	if degree(remainder) < degree(b) {
 		return into_poly(nil), remainder, true
@@ -177,11 +174,11 @@ divide_poly :: proc(
 		}
 
 		// Update remainder
-		remainder.data = remainder.data[1:] // nix terms as we are able to do long-division steps
+		remainder.data = remainder.data[1:] // Nix terms as we are able to do long-division steps
 		remainder_degree = degree(remainder)
 	}
 	if return_quotient {
-		quotient = into_poly(quotient_coeffs, true) //owned
+		quotient = into_poly(quotient_coeffs, true) // Owned
 	} else {
 		delete(quotient_coeffs)
 	}
@@ -190,15 +187,18 @@ divide_poly :: proc(
 }
 
 // Evaluate the polynomial at a point
-evaluate :: proc(p: Polynomial, x: byte) -> (byte, bool) {
-	if p.data == nil {return 0, false}
-	// Horner's method for polynomial evaluation
-	result: byte = 0
-	for i := 0; i < len(p.data); i += 1 {
-		// result = result * x + coefficient
-		result = add(multiply(result, x), p.data[i])
+evaluate :: proc(p: Polynomial, x: byte) -> (res: byte, ok: bool) {
+	if p.data == nil {
+		return
 	}
-	return result, true
+
+	// Horner's method for polynomial evaluation
+	for pd in p.data {
+		// result = result * x + coefficient
+		res = add(multiply(res, x), pd)
+	}
+
+	return res, true
 }
 
 // Generate generator polynomial for Reed-Solomon encoding
@@ -211,7 +211,7 @@ generate_generator :: proc(degree: int, allocator := context.allocator) -> Polyn
 	// Multiply by (x + a^i) for i from 1 to degree-1
 	for i in 1 ..< degree {
 		term := into_poly([]byte{1, exp_table[i]})
-		tmp := multiply_poly(g, term, allocator)
+		tmp  := multiply_poly(g, term, allocator)
 
 		destroy_poly(g) // safe-deletes
 		g = tmp
@@ -221,7 +221,9 @@ generate_generator :: proc(degree: int, allocator := context.allocator) -> Polyn
 }
 
 // Encode message using Reed-Solomon
-encode_rs :: proc(message: []byte, ec_bytes: int, allocator := context.allocator) -> []byte {
+encode_rs :: proc(message: []byte, ec_bytes: int, allocator := context.allocator) -> (res: []byte) {
+	context.allocator = allocator
+
 	if ec_bytes == 0 {return message}
 
 	generator := generate_generator(ec_bytes)
@@ -240,20 +242,21 @@ encode_rs :: proc(message: []byte, ec_bytes: int, allocator := context.allocator
 	assert(div_ok)
 	defer destroy_poly(remainder)
 
-	result := make([]byte, ec_bytes)
+	res = make([]byte, ec_bytes)
 
 	// Fill in the error correction bytes
 	rem_offset := max(0, len(remainder.data) - ec_bytes)
-	for i := 0; i < min(ec_bytes, len(remainder.data)); i += 1 {
-		result[i] = remainder.data[rem_offset + i]
+	for i in 0 ..< min(ec_bytes, len(remainder.data)) {
+		res[i] = remainder.data[rem_offset + i]
 	}
 
-	return result
+	return
 }
 
 to_string :: proc(p: ^Polynomial, allocator := context.allocator) -> string {
-	if len(p.data) == 0 {return "0"}
 	context.allocator = allocator
+
+	if len(p.data) == 0 {return "0"}
 
 	result := ""
 	for i := 0; i < len(p.data); i += 1 {
@@ -283,59 +286,38 @@ to_string :: proc(p: ^Polynomial, allocator := context.allocator) -> string {
 	return result
 }
 
+import "core:log"
+import "core:slice"
 import "core:testing"
+
+Test_Vector :: struct {
+	message: []byte, // Input
+	ecc:     []byte, // Expected ECC output
+}
+
+test_vectors := []Test_Vector{
+	{ // 4-byte message with 4 ECC bytes
+		{0x40, 0xd2, 0x75, 0x47}, // 64, 210, 117, 71
+		{0x55, 0x7e, 0xb6, 0x3d}, // 85, 126, 182, 61
+	},
+	{ // Test case 2: QR code typical message
+		{0x40, 0xd2, 0x75, 0x47, 0x76, 0x17, 0x32, 0x06, 0x27, 0x26, 0x96, 0xc6, 0xc6, 0x96, 0x70, 0xec},
+		{0xbc, 0x2a, 0x90, 0x13, 0x6b, 0xaf, 0xef, 0xfd, 0x4b, 0xe0},
+	},
+}
 
 @(test)
 test_reed_solomon :: proc(t: ^testing.T) {
+	for test, i in test_vectors {
+		ecc := encode_rs(test.message, len(test.ecc))
+		defer delete(ecc)
 
-	// Test case 1: 4-byte message with 4 ECC bytes
-	message1 := []byte{0x40, 0xd2, 0x75, 0x47} // 64, 210, 117, 71
-	expected_ecc1 := []byte{0x55, 0x7e, 0xb6, 0x3d} // 85, 126, 182, 61
+		passed := slice.equal(test.ecc, ecc)
+		testing.expectf(t, passed, "Expected %v to equal %v", ecc, test.ecc)
 
-	ecc1 := encode_rs(message1, 4)
-	defer delete(ecc1)
-	testing.expect_value(t, len(ecc1), 4)
-
-	for i in 0 ..< 4 {
-		testing.expect_value(t, ecc1[i], expected_ecc1[i])
+		log.infof("Test case %v %v", i + 1, "passed" if passed else "failed")
+		log.info("Message:     ", test.message)
+		log.info("Expected ECC:", test.ecc)
+		log.info("Actual ECC:  ", ecc)
 	}
-
-	fmt.println("Test case 1 passed:")
-	fmt.println("Message:", message1)
-	fmt.println("Expected ECC:", expected_ecc1)
-	fmt.println("Actual ECC:", ecc1)
-
-	// Test case 2: QR code typical message
-	message2 := []byte {
-		0x40,
-		0xd2,
-		0x75,
-		0x47,
-		0x76,
-		0x17,
-		0x32,
-		0x06,
-		0x27,
-		0x26,
-		0x96,
-		0xc6,
-		0xc6,
-		0x96,
-		0x70,
-		0xec,
-	}
-	expected_ecc2 := []byte{0xbc, 0x2a, 0x90, 0x13, 0x6b, 0xaf, 0xef, 0xfd, 0x4b, 0xe0}
-
-	ecc2 := encode_rs(message2, 10)
-	defer delete(ecc2)
-	testing.expect_value(t, len(ecc2), 10)
-
-	for i in 0 ..< 10 {
-		testing.expect_value(t, ecc2[i], expected_ecc2[i])
-	}
-
-	fmt.println("\nTest case 2 passed:")
-	fmt.println("Message:", message2)
-	fmt.println("Expected ECC:", expected_ecc2)
-	fmt.println("Actual ECC:", ecc2)
 }
