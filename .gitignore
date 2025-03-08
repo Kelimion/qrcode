@@ -1,0 +1,5 @@
+*.pdf
+*.pdb
+*.exe
+unused/
+*.txt
